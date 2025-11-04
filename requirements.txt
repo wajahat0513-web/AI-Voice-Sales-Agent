@@ -36,7 +36,7 @@ pyactiveresource
 pycparser
 pydantic
 pydantic_core
-#pydub
+pydub
 PyJWT
 python-dotenv
 python-multipart
@@ -75,3 +75,4 @@ elevenlabs
 
 #sounddevice
 #soundfile
+
