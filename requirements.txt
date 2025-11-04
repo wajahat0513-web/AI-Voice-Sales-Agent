@@ -5,7 +5,7 @@ aiosignal
 annotated-types
 anyio
 attrs
-audioread
+#audioread
 certifi
 cffi
 charset-normalizer
@@ -32,11 +32,11 @@ packaging
 postgrest
 propcache
 pyactiveresource
-PyAudio
+#PyAudio
 pycparser
 pydantic
 pydantic_core
-pydub
+#pydub
 PyJWT
 python-dotenv
 python-multipart
@@ -72,5 +72,6 @@ psycopg2-binary
 elevenlabs
 
 
-sounddevice
-soundfile
+
+#sounddevice
+#soundfile
