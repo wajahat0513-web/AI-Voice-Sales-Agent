@@ -1,5 +1,6 @@
 # app/api/twilio_endpoints.py
 
+
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import Response
 from app.services.ai_service import generate_ai_response_live, transcribe_audio, summarize_conversation
@@ -16,72 +17,132 @@ import asyncio
 import audioop
 import struct
 from dotenv import load_dotenv
-import json
+
+
+
 
 load_dotenv()
 router = APIRouter()
 
-# Initialize clients - all optional, app works without them
-zendesk_client = None
-shopify_client = None
-db_client = None
 
+# Initialize clients
 try:
-    from app.services.zendesk_client import ZendeskClient
     zendesk_client = ZendeskClient()
     print("✅ ZendeskClient initialized")
 except Exception as e:
-    print(f"ℹ️  ZendeskClient not available: {e}")
+    zendesk_client = None
+    print(f"⚠️ ZendeskClient init failed: {e}")
+
 
 try:
-    from app.services.shopify_client import ShopifyClient
     shopify_client = ShopifyClient()
     print("✅ ShopifyClient initialized")
 except Exception as e:
-    print(f"ℹ️  ShopifyClient not available: {e}")
+    shopify_client = None
+    print(f"⚠️ ShopifyClient init failed: {e}")
+
 
 try:
-    from app.core.db_client import DatabaseClient
     db_client = DatabaseClient()
-    if db_client.enabled:
-        print("✅ DatabaseClient initialized")
-    else:
-        print("ℹ️  DatabaseClient disabled (no database configured)")
+    print("✅ DatabaseClient initialized")
 except Exception as e:
-    print(f"ℹ️  DatabaseClient not available: {e}")
+    db_client = None
+    print(f"⚠️ DatabaseClient init failed: {e}")
+
+
+
 
 # ============================================================
-# AUDIO CONVERSION UTILITIES
+# AUDIO CONVERSION UTILITIES - OPTIMIZED FOR TWILIO
 # ============================================================
+
 
 def mulaw_to_linear_pcm(mulaw_data: bytes) -> bytes:
-    """Convert μ-law to 16-bit linear PCM"""
+    """
+    Convert μ-law to 16-bit linear PCM using Python's audioop.
+    Twilio uses 8kHz μ-law audio.
+    """
     try:
         if not mulaw_data or len(mulaw_data) == 0:
             return b''
-        linear_pcm = audioop.ulaw2lin(mulaw_data, 2)
+       
+        # Use audioop for reliable μ-law decoding
+        linear_pcm = audioop.ulaw2lin(mulaw_data, 2)  # 2 = 16-bit
         return linear_pcm
     except Exception as e:
         print(f"❌ μ-law to PCM error: {e}")
         return b''
 
+
+
+
 def linear_pcm_to_mulaw(pcm_data: bytes) -> bytes:
-    """Convert 16-bit linear PCM to μ-law"""
+    """
+    Convert 16-bit linear PCM to μ-law using Python's audioop.
+    CRITICAL: Input must be 8kHz 16-bit PCM for Twilio.
+    """
     try:
         if not pcm_data or len(pcm_data) == 0:
             return b''
-        
+       
+        # Ensure even length for 16-bit samples
         if len(pcm_data) % 2 != 0:
             pcm_data = pcm_data[:-1]
-        
+       
         if len(pcm_data) == 0:
             return b''
-        
-        mulaw_data = audioop.lin2ulaw(pcm_data, 2)
+       
+        # Use audioop for reliable μ-law encoding
+        mulaw_data = audioop.lin2ulaw(pcm_data, 2)  # 2 = 16-bit
         return mulaw_data
     except Exception as e:
         print(f"❌ PCM to μ-law error: {e}")
+        traceback.print_exc()
         return b''
+
+
+
+
+def resample_audio_safe(pcm_data: bytes, from_rate: int, to_rate: int) -> bytes:
+    """
+    Safely resample audio with proper frame alignment.
+    """
+    try:
+        if from_rate == to_rate:
+            return pcm_data
+       
+        # Ensure data length is even (16-bit samples)
+        if len(pcm_data) % 2 != 0:
+            pcm_data = pcm_data[:-1]
+       
+        if len(pcm_data) == 0:
+            return b''
+       
+        # Calculate expected output size
+        num_frames_in = len(pcm_data) // 2  # 16-bit = 2 bytes per frame
+        num_frames_out = int(num_frames_in * to_rate / from_rate)
+       
+        # Adjust input to ensure whole number of output frames
+        adjusted_frames = int(num_frames_out * from_rate / to_rate)
+        adjusted_bytes = adjusted_frames * 2
+       
+        if adjusted_bytes > len(pcm_data):
+            adjusted_bytes = len(pcm_data)
+       
+        # Trim to adjusted size
+        pcm_data = pcm_data[:adjusted_bytes]
+       
+        # Perform resampling
+        resampled, _ = audioop.ratecv(pcm_data, 2, 1, from_rate, to_rate, None)
+        return resampled
+       
+    except Exception as e:
+        print(f"❌ Resampling error: {e}")
+        traceback.print_exc()
+        return pcm_data
+
+
+
 
 def create_wav_header(
     data_size: int,
@@ -92,13 +153,13 @@ def create_wav_header(
     """Create proper WAV file header"""
     byte_rate = sample_rate * channels * bits_per_sample // 8
     block_align = channels * bits_per_sample // 8
-    
+   
     header = b'RIFF'
     header += struct.pack('<I', data_size + 36)
     header += b'WAVE'
     header += b'fmt '
     header += struct.pack('<I', 16)
-    header += struct.pack('<H', 1)
+    header += struct.pack('<H', 1)  # PCM format
     header += struct.pack('<H', channels)
     header += struct.pack('<I', sample_rate)
     header += struct.pack('<I', byte_rate)
@@ -106,12 +167,36 @@ def create_wav_header(
     header += struct.pack('<H', bits_per_sample)
     header += b'data'
     header += struct.pack('<I', data_size)
-    
+   
     return header
+
+
+
+
+def calculate_audio_energy(mulaw_data: bytes) -> float:
+    """Calculate audio energy to detect speech"""
+    try:
+        if not mulaw_data or len(mulaw_data) == 0:
+            return 0.0
+        
+        # Convert to PCM for energy calculation
+        pcm_data = mulaw_to_linear_pcm(mulaw_data)
+        if not pcm_data or len(pcm_data) < 2:
+            return 0.0
+        
+        # Calculate RMS energy
+        rms = audioop.rms(pcm_data, 2)
+        return float(rms)
+    except Exception as e:
+        return 0.0
+
+
+
 
 # ============================================================
 # TWILIO WEBHOOKS
 # ============================================================
+
 
 @router.post("/webhook/voice")
 async def voice_webhook(request: Request):
@@ -121,29 +206,34 @@ async def voice_webhook(request: Request):
         caller_number = form_data.get("From", "Unknown")
         called_number = form_data.get("To", "Unknown")
         call_sid = form_data.get("CallSid", "Unknown")
-        
+       
         print(f"📞 Incoming call: {caller_number} → {called_number} (SID: {call_sid})")
-        
+       
+        # Get WebSocket URL from environment
         websocket_url = os.getenv(
             "WEBSOCKET_URL",
             "wss://your-ngrok-url.ngrok.io/api/twilio/media-stream"
         )
         print(f"🌐 Using WebSocket URL: {websocket_url}")
-        
+       
+        # Create TwiML response
         response = VoiceResponse()
         connect = Connect()
         connect.stream(url=websocket_url)
         response.append(connect)
-        
+       
         print(f"✅ TwiML generated for call SID {call_sid}")
         return Response(content=str(response), media_type="application/xml")
-        
+       
     except Exception as e:
         print(f"❌ Error in voice_webhook: {e}")
         traceback.print_exc()
         error_response = VoiceResponse()
         error_response.say("Sorry, something went wrong. Please try again later.")
         return Response(content=str(error_response), media_type="application/xml")
+
+
+
 
 @router.post("/webhook/status")
 async def status_webhook(request: Request):
@@ -153,7 +243,7 @@ async def status_webhook(request: Request):
         call_sid = form_data.get("CallSid", "Unknown")
         call_status = form_data.get("CallStatus", "Unknown")
         print(f"📊 Call {call_sid} status: {call_status}")
-        
+       
         if db_client:
             try:
                 db_client.insert_call_metadata(
@@ -165,492 +255,531 @@ async def status_webhook(request: Request):
                 )
             except Exception as e:
                 print(f"⚠️ DB status log error: {e}")
-        
+       
         return {"status": "received"}
-        
+       
     except Exception as e:
         print(f"❌ Error in status_webhook: {e}")
         return {"status": "error", "error": str(e)}
 
-# Global cache
+
+
+
+# Global cache for Shopify data per call
 _shopify_cache = {}
 
-# ============================================================
-# CALL STATE MANAGER
-# ============================================================
 
-class CallState:
-    """Manages state for a single call"""
-    def __init__(self, call_sid: str):
-        self.call_sid = call_sid
-        self.conversation_history = []
-        self.audio_buffer = []
-        self.caller_email = None
-        self.caller_number = "Unknown"
-        self.called_number = "Unknown"
-        self.start_time = time.time()
-        self.last_processing_time = time.time()
-        self.greeting_sent = False
-        self.is_processing = False
-        self.agent_speaking = False
-        self.current_mark = None
-        self.interrupted = False
-        self.stream_sid = None
-        
-    def add_message(self, role: str, text: str):
-        """Add message to conversation history"""
-        self.conversation_history.append({
-            "role": role,
-            "text": text,
-            "timestamp": time.time()
-        })
-        
-    def get_context(self, num_messages: int = 6) -> str:
-        """Get recent conversation context"""
-        recent = self.conversation_history[-num_messages:]
-        return "\n".join([f"{msg['role']}: {msg['text']}" for msg in recent])
-    
-    def get_duration(self) -> int:
-        """Get call duration in seconds"""
-        return int(time.time() - self.start_time)
+
 
 # ============================================================
-# WEBSOCKET MEDIA STREAM
+# WEBSOCKET MEDIA STREAM - ULTRA-LOW LATENCY WITH INTERRUPTION
 # ============================================================
+
 
 @router.websocket("/media-stream")
 async def media_stream(websocket: WebSocket):
-    """Handle real-time audio streaming with Twilio"""
+    """Handle real-time audio streaming from Twilio with MINIMAL LATENCY and INTERRUPTION HANDLING"""
     await websocket.accept()
     print("🔌 WebSocket connection established")
-    
-    state = None
+   
+    # Session state
+    conversation_history = []
+    call_sid = None
+    stream_sid = None
+    caller_number = None
+    called_number = None
+    caller_email = None
+    audio_buffer = []
+    start_time = None
+    last_processing_time = 0
+    processing_interval = 2.0  # REDUCED to 2 seconds for faster response
+    greeting_sent = False
     stop_received = False
+    is_processing = False  # Prevent concurrent processing
     
-    # Audio processing configuration
-    PROCESSING_INTERVAL = 1.8  # Process audio every 1.8 seconds
-    MIN_AUDIO_SIZE = 2500  # Minimum bytes before processing
-    INTERRUPT_THRESHOLD = 400  # RMS threshold for interrupt detection
-    SILENCE_THRESHOLD = 150  # RMS threshold for silence
-    
+    # INTERRUPTION HANDLING STATE
+    is_agent_speaking = False  # Track if agent is currently playing audio
+    interrupt_flag = asyncio.Event()  # Signal to stop agent audio
+    speech_energy_threshold = 300.0  # Energy threshold to detect speech
+    consecutive_speech_frames = 0  # Count consecutive frames with speech
+    speech_frames_needed = 3  # Number of consecutive frames to trigger interruption
+   
     try:
         while not stop_received:
             try:
-                # Receive data with timeout
-                data = await asyncio.wait_for(
-                    websocket.receive_json(), 
-                    timeout=30.0
-                )
-            except asyncio.TimeoutError:
-                print("⏱️ WebSocket timeout - no data received")
-                break
-            except WebSocketDisconnect:
-                print("🔌 WebSocket disconnected by client")
-                break
-            except Exception as e:
-                print(f"❌ WebSocket receive error: {e}")
-                break
-            
-            event_type = data.get("event")
-            
-            # =============== START EVENT ===============
-            if event_type == "start":
-                start_info = data.get("start", {})
-                call_sid = start_info.get("callSid")
-                stream_sid = start_info.get("streamSid")
-                
-                # Initialize call state
-                state = CallState(call_sid)
-                state.stream_sid = stream_sid
-                
-                # Extract call details from custom parameters if available
-                custom_params = start_info.get("customParameters", {})
-                state.caller_number = custom_params.get("From", "Unknown")
-                state.called_number = custom_params.get("To", "Unknown")
-                
-                print(f"🎬 Stream started - Call: {call_sid}, Stream: {stream_sid}")
-                
-                # Send greeting asynchronously
-                asyncio.create_task(send_greeting(websocket, state))
-                
-            # =============== MEDIA EVENT ===============
-            elif event_type == "media":
-                if not state:
-                    continue
-                    
-                media = data.get("media", {})
-                payload = media.get("payload")
-                
-                if not payload:
-                    continue
-                
+                # Receive WebSocket message with timeout
                 try:
-                    mulaw_bytes = base64.b64decode(payload)
-                except Exception as e:
-                    print(f"❌ Base64 decode error: {e}")
-                    continue
-                
-                # Check for interruption if agent is speaking
-                if state.agent_speaking:
-                    try:
-                        pcm_chunk = mulaw_to_linear_pcm(mulaw_bytes)
-                        if pcm_chunk and len(pcm_chunk) > 0:
-                            rms = audioop.rms(pcm_chunk, 2)
+                    data = await asyncio.wait_for(websocket.receive_json(), timeout=20.0)
+                except asyncio.TimeoutError:
+                    print("⏱️ WebSocket timeout - no data received")
+                    break
+                except WebSocketDisconnect:
+                    print("🔌 Client disconnected")
+                    break
+               
+                event_type = data.get("event")
+               
+                # ==================== START EVENT ====================
+                if event_type == "start":
+                    start_info = data.get("start", {})
+                    call_sid = start_info.get("callSid", f"UNKNOWN_{int(time.time())}")
+                    stream_sid = start_info.get("streamSid")
+                    caller_number = start_info.get("customParameters", {}).get("From") or start_info.get("from", "Unknown")
+                    called_number = start_info.get("customParameters", {}).get("To") or start_info.get("to", "Unknown")
+                    custom_params = start_info.get("customParameters", {})
+                    caller_email = custom_params.get("caller_email")
+                    start_time = time.time()
+                    last_processing_time = start_time
+                   
+                    print(f"🎬 Stream started")
+                    print(f"   Call SID: {call_sid}")
+                    print(f"   Stream SID: {stream_sid}")
+                    print(f"   From: {caller_number}")
+                    print(f"   To: {called_number}")
+                    print(f"   Email: {caller_email or 'Not provided'}")
+                   
+                    # CRITICAL: Fetch Shopify data ONCE and cache it
+                    if shopify_client and caller_email:
+                        asyncio.create_task(
+                            fetch_and_cache_shopify(caller_email, call_sid)
+                        )
+                   
+                    # Send greeting immediately WITHOUT Shopify data
+                    if not greeting_sent and stream_sid:
+                        asyncio.create_task(
+                            send_greeting(websocket, stream_sid, conversation_history, interrupt_flag, lambda: is_agent_speaking, lambda v: set_agent_speaking_state(v))
+                        )
+                        greeting_sent = True
+               
+                # ==================== MEDIA EVENT ====================
+                elif event_type == "media":
+                    media = data.get("media", {})
+                    audio_payload = media.get("payload")
+                   
+                    if not audio_payload:
+                        continue
+                   
+                    # Decode incoming μ-law audio from Twilio
+                    mulaw_bytes = base64.b64decode(audio_payload)
+                    
+                    # INTERRUPTION DETECTION: Check if caller is speaking while agent is speaking
+                    if is_agent_speaking:
+                        energy = calculate_audio_energy(mulaw_bytes)
+                        
+                        if energy > speech_energy_threshold:
+                            consecutive_speech_frames += 1
                             
-                            # Detect user speaking while agent talks
-                            if rms > INTERRUPT_THRESHOLD:
-                                print(f"⚡ INTERRUPT DETECTED (RMS={rms}) - Stopping agent")
-                                state.agent_speaking = False
-                                state.interrupted = True
+                            if consecutive_speech_frames >= speech_frames_needed:
+                                # INTERRUPTION DETECTED!
+                                print(f"🛑 INTERRUPTION DETECTED (energy: {energy:.0f})")
+                                interrupt_flag.set()  # Signal to stop agent audio
+                                is_agent_speaking = False
+                                consecutive_speech_frames = 0
                                 
-                                # Send clear command to stop current audio
+                                # Send clear command to stop audio playback
                                 try:
                                     await websocket.send_json({
                                         "event": "clear",
-                                        "streamSid": state.stream_sid
+                                        "streamSid": stream_sid
                                     })
-                                    print("🛑 Sent 'clear' command to stop agent audio")
-                                except Exception as e:
-                                    print(f"⚠️ Failed to send clear: {e}")
-                                
-                                # Clear buffer and start fresh
-                                state.audio_buffer.clear()
-                    except Exception as e:
-                        print(f"⚠️ Interrupt detection error: {e}")
-                
-                # Add to buffer
-                state.audio_buffer.append(mulaw_bytes)
-                
-                # Process audio periodically
-                now = time.time()
-                time_since_last = now - state.last_processing_time
-                buffer_size = sum(len(chunk) for chunk in state.audio_buffer)
-                
-                should_process = (
-                    time_since_last >= PROCESSING_INTERVAL and
-                    buffer_size >= MIN_AUDIO_SIZE and
-                    not state.is_processing and
-                    not state.agent_speaking
-                )
-                
-                if should_process:
-                    state.is_processing = True
-                    state.last_processing_time = now
+                                    print("🔇 Sent clear command to stop agent audio")
+                                except Exception as clear_error:
+                                    print(f"⚠️ Failed to send clear command: {clear_error}")
+                        else:
+                            consecutive_speech_frames = 0
+                    else:
+                        consecutive_speech_frames = 0
                     
-                    # Get audio and clear buffer
-                    audio_chunks = state.audio_buffer.copy()
-                    state.audio_buffer.clear()
-                    
-                    # Process asynchronously
-                    asyncio.create_task(
-                        process_audio_chunk(
-                            audio_chunks,
-                            websocket,
-                            state
+                    audio_buffer.append(mulaw_bytes)
+                   
+                    # Process audio at intervals (but not if already processing)
+                    current_time = time.time()
+                    if (current_time - last_processing_time >= processing_interval
+                        and not is_processing
+                        and not is_agent_speaking  # Don't process while agent is speaking
+                        and len(audio_buffer) > 0):
+                       
+                        is_processing = True
+                        last_processing_time = current_time
+                       
+                        # Combine buffered audio
+                        combined_mulaw = b''.join(audio_buffer)
+                        audio_buffer.clear()
+                       
+                        # Skip if too short (less than 0.4 seconds)
+                        if len(combined_mulaw) < 3000:
+                            print(f"⏭️ Skipping short audio: {len(combined_mulaw)} bytes")
+                            is_processing = False
+                            continue
+                       
+                        # Process in background to not block receiving
+                        asyncio.create_task(
+                            process_audio_chunk_fast(
+                                combined_mulaw,
+                                websocket,
+                                stream_sid,
+                                conversation_history,
+                                caller_email,
+                                call_sid,
+                                current_time,
+                                interrupt_flag,
+                                lambda: is_agent_speaking,
+                                lambda v: set_agent_speaking_state(v)
+                            )
                         )
-                    )
-            
-            # =============== MARK EVENT ===============
-            elif event_type == "mark":
-                if state:
-                    mark_name = data.get("mark", {}).get("name")
-                    print(f"✓ Mark received: {mark_name}")
-                    
-                    if mark_name and "response_" in mark_name:
-                        # Agent finished speaking
-                        state.agent_speaking = False
-                        state.current_mark = None
-                        print("🔇 Agent finished speaking")
-            
-            # =============== STOP EVENT ===============
-            elif event_type == "stop":
-                if state:
-                    print(f"🏁 Stream stopped for call {state.call_sid}")
-                stop_received = True
-                
-    except Exception as e:
-        print(f"❌ WebSocket error: {e}")
-        traceback.print_exc()
-        
+                       
+                        # Reset processing flag after a short delay
+                        await asyncio.sleep(0.3)
+                        is_processing = False
+               
+                # ==================== STOP EVENT ====================
+                elif event_type == "stop":
+                    print(f"🏁 Stream stopped for call: {call_sid}")
+                    stop_received = True
+           
+            except Exception as e:
+                print(f"⚠️ WebSocket loop error: {e}")
+                traceback.print_exc()
+                break
+   
     finally:
-        # Cleanup and finalization
-        if state:
-            await finalize_call(state, websocket)
-        
-        try:
-            await websocket.close()
-        except:
-            pass
-        
-        print("🔌 WebSocket connection closed")
-
-# ============================================================
-# GREETING HANDLER
-# ============================================================
-
-async def send_greeting(websocket: WebSocket, state: CallState):
-    """Send initial greeting"""
-    if state.greeting_sent:
-        return
-    
-    state.greeting_sent = True
-    
-    try:
-        print("🎤 Generating greeting...")
-        
-        greeting_text = "Hi! Thanks for calling ArtByMaudsch. How can I help you today?"
-        
-        # Generate audio
-        from app.services.ai_service import get_elevenlabs_client
-        eleven_client = get_elevenlabs_client()
-        
-        audio_pcm = await eleven_client.text_to_speech_fast(greeting_text)
-        
-        if audio_pcm and len(audio_pcm) > 100:
-            # Log greeting
-            state.add_message("assistant", greeting_text)
-            
-            # Convert to μ-law and send
-            mulaw_audio = linear_pcm_to_mulaw(audio_pcm)
-            
-            if mulaw_audio and len(mulaw_audio) > 0:
-                payload = base64.b64encode(mulaw_audio).decode("utf-8")
-                
-                # Mark that agent is speaking
-                state.agent_speaking = True
-                mark_name = f"greeting_{int(time.time())}"
-                state.current_mark = mark_name
-                
-                # Send audio
-                await websocket.send_json({
-                    "event": "media",
-                    "streamSid": state.stream_sid,
-                    "media": {"payload": payload}
-                })
-                
-                # Send mark to detect when done
-                await websocket.send_json({
-                    "event": "mark",
-                    "streamSid": state.stream_sid,
-                    "mark": {"name": mark_name}
-                })
-                
-                print(f"🔊 Greeting sent: '{greeting_text}'")
-                
-                # Auto-clear speaking flag after expected duration
-                audio_duration = len(audio_pcm) / (8000 * 2)  # 8kHz, 16-bit
-                await asyncio.sleep(audio_duration + 0.5)
-                if state.current_mark == mark_name:
-                    state.agent_speaking = False
-                    print("🔇 Greeting completed (timeout)")
-            else:
-                print("❌ Greeting μ-law conversion failed")
-        else:
-            print("⚠️ No greeting audio generated")
-            
-    except Exception as e:
-        print(f"⚠️ Greeting error: {e}")
-        traceback.print_exc()
-        state.greeting_sent = False
-
-# ============================================================
-# AUDIO PROCESSING
-# ============================================================
-
-async def process_audio_chunk(
-    audio_chunks: list,
-    websocket: WebSocket,
-    state: CallState
-):
-    """Process accumulated audio chunks"""
-    try:
-        chunk_start = time.time()
-        
-        # Combine audio
-        combined_mulaw = b''.join(audio_chunks)
-        
-        print(f"🎤 Processing {len(combined_mulaw)} bytes of audio...")
-        
-        # Convert to PCM
-        pcm_audio = mulaw_to_linear_pcm(combined_mulaw)
-        
-        if not pcm_audio or len(pcm_audio) < 2000:
-            print(f"⏭️ Audio too short after conversion")
-            state.is_processing = False
-            return
-        
-        # Check if mostly silence
-        try:
-            rms = audioop.rms(pcm_audio, 2)
-            if rms < 150:
-                print(f"⏭️ Mostly silence detected (RMS={rms})")
-                state.is_processing = False
-                return
-        except:
-            pass
-        
-        # Create WAV for transcription
-        wav_audio = create_wav_header(len(pcm_audio), sample_rate=8000) + pcm_audio
-        
-        # Transcribe
-        transcript = await transcribe_audio(wav_audio)
-        
-        if not transcript or len(transcript.strip()) < 3:
-            print(f"⏭️ No valid transcript")
-            state.is_processing = False
-            return
-        
-        transcript = transcript.strip()
-        print(f"👤 User: '{transcript}'")
-        
-        # Add to history
-        state.add_message("user", transcript)
-        
-        # Get conversation context
-        context = state.get_context(num_messages=6)
-        
-        # Get cached Shopify data
-        cached_shopify = _shopify_cache.get(state.call_sid)
-        
-        # Generate AI response
-        print("🤖 Generating AI response...")
-        ai_text, ai_audio = await generate_ai_response_live(
-            context,
-            caller_email=state.caller_email,
-            shopify_client=None,
-            shopify_data_cache=cached_shopify
-        )
-        
-        if not ai_text:
-            print("⚠️ No AI response generated")
-            state.is_processing = False
-            return
-        
-        # Add to history
-        state.add_message("assistant", ai_text)
-        print(f"🤖 AI: '{ai_text}'")
-        
-        # Send audio response
-        if ai_audio and len(ai_audio) > 100:
-            # Convert to μ-law
-            mulaw_audio = linear_pcm_to_mulaw(ai_audio)
-            
-            if mulaw_audio and len(mulaw_audio) > 0:
-                payload = base64.b64encode(mulaw_audio).decode("utf-8")
-                
-                # Mark agent as speaking
-                state.agent_speaking = True
-                state.interrupted = False
-                mark_name = f"response_{int(time.time() * 1000)}"
-                state.current_mark = mark_name
-                
-                # Send audio
-                await websocket.send_json({
-                    "event": "media",
-                    "streamSid": state.stream_sid,
-                    "media": {"payload": payload}
-                })
-                
-                # Send mark
-                await websocket.send_json({
-                    "event": "mark",
-                    "streamSid": state.stream_sid,
-                    "mark": {"name": mark_name}
-                })
-                
-                total_time = time.time() - chunk_start
-                print(f"🔊 Response sent ({total_time:.2f}s): {len(mulaw_audio)} bytes")
-                
-                # Auto-clear speaking flag after expected duration
-                audio_duration = len(ai_audio) / (8000 * 2)
-                await asyncio.sleep(audio_duration + 0.5)
-                if state.current_mark == mark_name and not state.interrupted:
-                    state.agent_speaking = False
-                    print("🔇 Response playback completed")
-            else:
-                print("❌ Response μ-law conversion failed")
-        else:
-            print("⚠️ No AI audio to send")
-        
-    except Exception as e:
-        print(f"❌ Audio processing error: {e}")
-        traceback.print_exc()
-    finally:
-        state.is_processing = False
-
-# ============================================================
-# CALL FINALIZATION
-# ============================================================
-
-async def finalize_call(state: CallState, websocket: WebSocket):
-    """Finalize call and save data"""
-    try:
-        print(f"📝 Finalizing call {state.call_sid}...")
+        print(f"🔌 Closing WebSocket for call: {call_sid}")
+       
+        # Stop any ongoing agent speech
+        interrupt_flag.set()
+        is_agent_speaking = False
         
         # Process any remaining audio
-        if state.audio_buffer:
+        if audio_buffer and len(audio_buffer) > 0:
             try:
-                combined_mulaw = b''.join(state.audio_buffer)
-                if len(combined_mulaw) > 2000:
+                combined_mulaw = b''.join(audio_buffer)
+                if len(combined_mulaw) > 8000:
                     pcm_audio = mulaw_to_linear_pcm(combined_mulaw)
-                    wav_audio = create_wav_header(len(pcm_audio)) + pcm_audio
+                    wav_audio = create_wav_header(len(pcm_audio), sample_rate=8000) + pcm_audio
                     transcript = await transcribe_audio(wav_audio)
                     if transcript and transcript.strip():
-                        state.add_message("user", transcript)
+                        conversation_history.append({
+                            "role": "user",
+                            "text": transcript,
+                            "timestamp": time.time()
+                        })
                         print(f"👤 User (final): '{transcript}'")
             except Exception as e:
                 print(f"⚠️ Final audio processing error: {e}")
-        
-        # Generate transcript
+       
+        # Generate conversation summary
         full_transcript = "\n".join([
             f"{msg['role'].capitalize()}: {msg['text']}"
-            for msg in state.conversation_history
+            for msg in conversation_history
         ])
-        
-        # Generate summary
+       
         summary = ""
         if full_transcript and len(full_transcript) > 50:
             try:
                 summary = await summarize_conversation(full_transcript)
                 print(f"📋 Summary: {summary[:100]}...")
             except Exception as e:
-                print(f"⚠️ Summary error: {e}")
-                summary = "Summary generation failed"
-        
-        duration = state.get_duration()
-        
+                print(f"⚠️ Summary generation error: {e}")
+       
+        duration = int(time.time() - start_time) if start_time else 0
+       
         # Log to database
-        if db_client and db_client.enabled:
+        if db_client and call_sid:
             try:
                 db_client.insert_call_transcript(
-                    call_sid=state.call_sid,
-                    from_number=state.caller_number,
-                    to_number=state.called_number,
+                    call_sid=call_sid,
+                    from_number=caller_number or "Unknown",
+                    to_number=called_number or "Unknown",
                     transcript=full_transcript,
                     summary=summary
                 )
-                print("✅ Transcript logged to database")
-                
+                print("✅ Call transcript logged to database")
+               
                 db_client.insert_call_metadata(
-                    call_sid=state.call_sid,
+                    call_sid=call_sid,
                     call_status="completed",
                     duration=duration,
                     call_type="inbound",
                     tags=["completed", "ai_handled"]
                 )
-                print("✅ Metadata logged to database")
+                print("✅ Call metadata logged to database")
             except Exception as e:
                 print(f"⚠️ Database logging error: {e}")
-        
-        # Clean up cache
-        if state.call_sid in _shopify_cache:
-            del _shopify_cache[state.call_sid]
-        
-        print(f"✅ Call finalized: {state.call_sid}")
+
+
+        # Create Zendesk ticket (COMMENTED OUT - uncomment if needed)
+        # if zendesk_client and summary and call_sid:
+        #     try:
+        #         ticket_id = zendesk_client.create_ticket(
+        #             subject=f"AI Call from {caller_number or 'Unknown'}",
+        #             description=f"""Call Summary:
+        # {summary}
+        #
+        # Full Transcript:
+        # {full_transcript}
+        #
+        # Call Details:
+        # - Call SID: {call_sid}
+        # - From: {caller_number}
+        # - To: {called_number}
+        # - Duration: {duration} seconds
+        # - Email: {caller_email or 'Not provided'}
+        # """,
+        #             requester_email=caller_email or "noreply@artbymaudsch.com",
+        #             tags=["ai_call", "phone_support", "automated"]
+        #         )
+        #        
+        #         print(f"🎫 Zendesk ticket created: #{ticket_id}")
+        #        
+        #         # Log ticket to database
+        #         if db_client:
+        #             try:
+        #                 db_client.insert_zendesk_ticket(
+        #                     call_sid=call_sid,
+        #                     zendesk_ticket_id=ticket_id
+        #                 )
+        #             except Exception as e:
+        #                 if "duplicate key" not in str(e).lower():
+        #                     print(f"⚠️ Zendesk ticket logging error: {e}")
+        #    
+        #     except Exception as e:
+        #         print(f"⚠️ Zendesk ticket creation error: {e}")
+        #         traceback.print_exc()
+       
+        print(f"✅ Call session complete: {call_sid}")
         print(f"   Duration: {duration}s")
-        print(f"   Messages: {len(state.conversation_history)}")
-        
+        print(f"   Messages: {len(conversation_history)}")
+       
+        # Clean up Shopify cache for this call
+        if call_sid in _shopify_cache:
+            del _shopify_cache[call_sid]
+
+
+# Helper to safely update is_agent_speaking
+def set_agent_speaking_state(value: bool):
+    """Helper to update agent speaking state"""
+    global is_agent_speaking
+    is_agent_speaking = value
+
+
+async def fetch_and_cache_shopify(email: str, call_sid: str):
+    """Fetch Shopify data ONCE and cache it for the entire call"""
+    global _shopify_cache
+    try:
+        if shopify_client:
+            print(f"🛒 Background Shopify fetch for {email}...")
+            orders = await asyncio.get_event_loop().run_in_executor(
+                None,
+                shopify_client.get_customer_orders,
+                email
+            )
+            if orders and len(orders) > 0:
+                _shopify_cache[call_sid] = orders[0]
+                print(f"✅ Shopify: Cached order {orders[0].get('name')} for call {call_sid}")
+            else:
+                _shopify_cache[call_sid] = None
+                print(f"ℹ️  Shopify: No orders found for {email}")
     except Exception as e:
-        print(f"❌ Finalization error: {e}")
+        print(f"⚠️ Background Shopify fetch error: {e}")
+        _shopify_cache[call_sid] = None
+
+
+
+
+async def send_greeting(websocket: WebSocket, stream_sid: str, conversation_history: list, interrupt_flag: asyncio.Event, get_speaking_state, set_speaking_state):
+    """Send greeting with minimal delay and interruption support"""
+    try:
+        print("🎤 Generating greeting...")
+       
+        # Generate greeting WITHOUT customer context to avoid confusion
+        ai_text, ai_audio_8khz_pcm = await generate_ai_response_live(
+            "Generate a brief, friendly greeting for an art gallery customer. Keep it under 10 words.",
+            caller_email=None,
+            shopify_client=None,
+            shopify_data_cache=None
+        )
+       
+        # Log greeting
+        if ai_text:
+            conversation_history.append({
+                "role": "assistant",
+                "text": ai_text,
+                "timestamp": time.time()
+            })
+       
+        # Send audio if available
+        if ai_audio_8khz_pcm and len(ai_audio_8khz_pcm) > 100:
+            # Convert 8kHz PCM to μ-law for Twilio
+            mulaw_audio = linear_pcm_to_mulaw(ai_audio_8khz_pcm)
+           
+            if mulaw_audio and len(mulaw_audio) > 0:
+                # Mark agent as speaking
+                set_speaking_state(True)
+                interrupt_flag.clear()
+                
+                payload = base64.b64encode(mulaw_audio).decode("utf-8")
+               
+                # Check connection before sending
+                try:
+                    await websocket.send_json({
+                        "event": "media",
+                        "streamSid": stream_sid,
+                        "media": {"payload": payload}
+                    })
+                    print(f"🔊 Greeting sent: {len(mulaw_audio)} bytes μ-law")
+                    
+                    # Wait for audio to finish or be interrupted
+                    audio_duration = len(mulaw_audio) / 8000.0  # 8kHz μ-law
+                    try:
+                        await asyncio.wait_for(interrupt_flag.wait(), timeout=audio_duration)
+                        print("🛑 Greeting interrupted")
+                    except asyncio.TimeoutError:
+                        pass  # Audio finished naturally
+                    
+                except Exception as send_error:
+                    print(f"❌ Failed to send greeting: {send_error}")
+                finally:
+                    set_speaking_state(False)
+            else:
+                print("❌ Greeting μ-law conversion failed")
+        else:
+            print(f"⚠️ No greeting audio generated")
+                   
+    except Exception as e:
+        print(f"⚠️ Greeting generation error: {e}")
         traceback.print_exc()
+        set_speaking_state(False)
+
+
+
+
+async def process_audio_chunk_fast(
+    mulaw_audio: bytes,
+    websocket: WebSocket,
+    stream_sid: str,
+    conversation_history: list,
+    caller_email: str,
+    call_sid: str,
+    timestamp: float,
+    interrupt_flag: asyncio.Event,
+    get_speaking_state,
+    set_speaking_state
+):
+    """Process audio chunk asynchronously with MINIMAL LATENCY and INTERRUPTION HANDLING"""
+    try:
+        chunk_start = time.time()
+        print(f"🎤 Processing {len(mulaw_audio)} bytes μ-law audio...")
+       
+        # Convert μ-law to 16-bit PCM
+        pcm_audio = mulaw_to_linear_pcm(mulaw_audio)
+       
+        if not pcm_audio or len(pcm_audio) < 2000:
+            print(f"⚠️ PCM conversion failed or too short")
+            return
+       
+        # Create WAV file for Whisper (8kHz)
+        wav_audio = create_wav_header(len(pcm_audio), sample_rate=8000) + pcm_audio
+       
+        # Transcribe
+        transcript = await transcribe_audio(wav_audio)
+       
+        if not transcript or len(transcript.strip()) < 3:
+            print(f"⏭️ Empty or invalid transcript")
+            return
+       
+        transcript = transcript.strip()
+        print(f"👤 User said: '{transcript}'")
+       
+        # Add to conversation history
+        conversation_history.append({
+            "role": "user",
+            "text": transcript,
+            "timestamp": timestamp
+        })
+       
+        # Generate AI response
+        try:
+            # Build context from recent conversation (only last 4 messages)
+            context_messages = []
+            for msg in conversation_history[-4:]:
+                role = msg['role']
+                text = msg['text']
+                context_messages.append(f"{role}: {text}")
+           
+            full_context = "\n".join(context_messages)
+           
+            # Get cached Shopify data
+            global _shopify_cache
+            cached_shopify = _shopify_cache.get(call_sid)
+           
+            print("🤖 Generating AI response...")
+            ai_text, ai_audio_8khz_pcm = await generate_ai_response_live(
+                full_context,
+                caller_email=caller_email,
+                shopify_client=None,  # Don't pass client to avoid API calls
+                shopify_data_cache=cached_shopify
+            )
+           
+            if not ai_text:
+                print("⚠️ No AI response generated")
+                return
+           
+            # Add AI response to history
+            conversation_history.append({
+                "role": "assistant",
+                "text": ai_text,
+                "timestamp": time.time()
+            })
+           
+            print(f"🤖 AI responds: '{ai_text}'")
+           
+            # Send audio response with interruption handling
+            if ai_audio_8khz_pcm and len(ai_audio_8khz_pcm) > 100 and stream_sid:
+                # Audio is already 8kHz PCM, just convert to μ-law
+                mulaw_audio = linear_pcm_to_mulaw(ai_audio_8khz_pcm)
+               
+                if mulaw_audio and len(mulaw_audio) > 0:
+                    # Mark agent as speaking
+                    set_speaking_state(True)
+                    interrupt_flag.clear()
+                    
+                    payload = base64.b64encode(mulaw_audio).decode("utf-8")
+                   
+                    try:
+                        await websocket.send_json({
+                            "event": "media",
+                            "streamSid": stream_sid,
+                            "media": {"payload": payload}
+                        })
+                       
+                        total_time = time.time() - chunk_start
+                        print(f"🔊 AI audio sent: {len(mulaw_audio)} bytes μ-law")
+                        print(f"⏱️ Total response time: {total_time:.2f}s")
+                        
+                        # Wait for audio to finish or be interrupted
+                        audio_duration = len(mulaw_audio) / 8000.0  # 8kHz μ-law
+                        try:
+                            await asyncio.wait_for(interrupt_flag.wait(), timeout=audio_duration)
+                            print("🛑 Agent speech interrupted by caller")
+                        except asyncio.TimeoutError:
+                            pass  # Audio finished naturally
+                       
+                    except Exception as send_error:
+                        print(f"❌ Failed to send AI audio: {send_error}")
+                    finally:
+                        set_speaking_state(False)
+                else:
+                    print("❌ AI audio μ-law conversion failed")
+            else:
+                print(f"⚠️ No AI audio to send")
+       
+        except Exception as e:
+            print(f"❌ AI response error: {e}")
+            traceback.print_exc()
+            set_speaking_state(False)
+   
+    except Exception as e:
+        print(f"❌ Audio processing error: {e}")
+        traceback.print_exc()
+        set_speaking_state(False)
 
