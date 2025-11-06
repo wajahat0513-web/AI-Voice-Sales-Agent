@@ -255,11 +255,11 @@ async def media_stream(websocket: WebSocket):
     current_response_task = None
     speech_buffer = []  # Buffer for continuous speech detection
     silence_counter = 0
-    min_speech_chunks = 3  # Minimum chunks of speech to process (reduce false positives)
+    min_speech_chunks = 2  # Minimum chunks of speech to process (reduce false positives) (lowered from 3)
    
     # Dynamic timing
     processing_interval = 1.8  # Start with 1.8s for responsiveness
-    silence_threshold = 800.0  # Energy threshold for silence detection
+    silence_threshold = 200.0  # Energy threshold for silence detection (lowered from 800)
    
     try:
         while not stop_received:
@@ -386,8 +386,8 @@ async def media_stream(websocket: WebSocket):
                         speech_buffer.clear()
                         silence_counter = 0
                        
-                        # Skip very short audio (< 0.5 seconds = 4000 bytes)
-                        if len(combined_mulaw) < 4000:
+                        # Skip very short audio (< 0.5 seconds = 4000 bytes) (<0.2 sec = 1000 bytes)
+                        if len(combined_mulaw) < 1000:
                             print(f"⏭️ Skipping short audio: {len(combined_mulaw)} bytes")
                             continue
                        
