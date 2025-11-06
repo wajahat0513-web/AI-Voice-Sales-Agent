@@ -32,7 +32,7 @@ async def transcribe_audio(audio_bytes: bytes, min_length: int = 2) -> str:
     Expects WAV format audio (8kHz, 16-bit PCM).
     """
     try:
-        if len(audio_bytes) < 2000:
+        if len(audio_bytes) < 400: # lowered from 2000
             return ""
 
 
