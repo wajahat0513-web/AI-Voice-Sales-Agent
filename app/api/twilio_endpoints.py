@@ -21,27 +21,34 @@ import json
 load_dotenv()
 router = APIRouter()
 
-# Initialize clients
+# Initialize clients - all optional, app works without them
+zendesk_client = None
+shopify_client = None
+db_client = None
+
 try:
+    from app.services.zendesk_client import ZendeskClient
     zendesk_client = ZendeskClient()
     print("✅ ZendeskClient initialized")
 except Exception as e:
-    zendesk_client = None
-    print(f"⚠️ ZendeskClient init failed: {e}")
+    print(f"ℹ️  ZendeskClient not available: {e}")
 
 try:
+    from app.services.shopify_client import ShopifyClient
     shopify_client = ShopifyClient()
     print("✅ ShopifyClient initialized")
 except Exception as e:
-    shopify_client = None
-    print(f"⚠️ ShopifyClient init failed: {e}")
+    print(f"ℹ️  ShopifyClient not available: {e}")
 
 try:
+    from app.core.db_client import DatabaseClient
     db_client = DatabaseClient()
-    print("✅ DatabaseClient initialized")
+    if db_client.enabled:
+        print("✅ DatabaseClient initialized")
+    else:
+        print("ℹ️  DatabaseClient disabled (no database configured)")
 except Exception as e:
-    db_client = None
-    print(f"⚠️ DatabaseClient init failed: {e}")
+    print(f"ℹ️  DatabaseClient not available: {e}")
 
 # ============================================================
 # AUDIO CONVERSION UTILITIES
@@ -613,7 +620,7 @@ async def finalize_call(state: CallState, websocket: WebSocket):
         duration = state.get_duration()
         
         # Log to database
-        if db_client:
+        if db_client and db_client.enabled:
             try:
                 db_client.insert_call_transcript(
                     call_sid=state.call_sid,
@@ -634,47 +641,6 @@ async def finalize_call(state: CallState, websocket: WebSocket):
                 print("✅ Metadata logged to database")
             except Exception as e:
                 print(f"⚠️ Database logging error: {e}")
-        
-
-        # Create Zendesk ticket (COMMENTED OUT - uncomment if needed)
-        # if zendesk_client and summary and call_sid:
-        #     try:
-        #         ticket_id = zendesk_client.create_ticket(
-        #             subject=f"AI Call from {caller_number or 'Unknown'}",
-        #             description=f"""Call Summary:
-        # {summary}
-        #
-        # Full Transcript:
-        # {full_transcript}
-        #
-        # Call Details:
-        # - Call SID: {call_sid}
-        # - From: {caller_number}
-        # - To: {called_number}
-        # - Duration: {duration} seconds
-        # - Email: {caller_email or 'Not provided'}
-        # """,
-        #             requester_email=caller_email or "noreply@artbymaudsch.com",
-        #             tags=["ai_call", "phone_support", "automated"]
-        #         )
-        #        
-        #         print(f"🎫 Zendesk ticket created: #{ticket_id}")
-        #        
-        #         # Log ticket to database
-        #         if db_client:
-        #             try:
-        #                 db_client.insert_zendesk_ticket(
-        #                     call_sid=call_sid,
-        #                     zendesk_ticket_id=ticket_id
-        #                 )
-        #             except Exception as e:
-        #                 if "duplicate key" not in str(e).lower():
-        #                     print(f"⚠️ Zendesk ticket logging error: {e}")
-        #    
-        #     except Exception as e:
-        #         print(f"⚠️ Zendesk ticket creation error: {e}")
-        #         traceback.print_exc()
-
         
         # Clean up cache
         if state.call_sid in _shopify_cache:
