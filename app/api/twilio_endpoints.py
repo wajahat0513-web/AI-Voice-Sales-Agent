@@ -651,7 +651,7 @@ async def process_audio_chunk_with_interruption(
         wav_audio = create_wav_header(len(pcm_audio), sample_rate=8000) + pcm_audio
        
         # Transcribe with enhanced settings
-        transcript = await transcribe_audio(wav_audio, min_length=3)
+        transcript = await transcribe_audio(wav_audio)
        
         if not transcript or len(transcript.strip()) < 2:
             print(f"⏭️ Empty or too short transcript")
