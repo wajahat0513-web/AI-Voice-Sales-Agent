@@ -1,12 +1,16 @@
 # app/core/elevenlabs_client.py
 
 
+
+
 import httpx
 import io
 from app.core.config import settings
 from typing import Optional
 import subprocess
 import os
+
+
 
 
 try:
@@ -28,37 +32,45 @@ except ImportError:
 
 
 
+
+
+
+
 class ElevenLabsClient:
     def __init__(self):
         self.api_key = settings.ELEVENLABS_API_KEY
         self.voice_id = settings.ELEVENLABS_VOICE_ID
         self.base_url = "https://api.elevenlabs.io/v1"
        
-        # CRITICAL: Persistent connection with optimized pooling
+        # CRITICAL: Use persistent connection with connection pooling
         self.client = httpx.AsyncClient(
-            timeout=httpx.Timeout(30.0, connect=5.0),  # Faster connect timeout
+            timeout=30.0,  # Reduced timeout
             limits=httpx.Limits(
-                max_keepalive_connections=10,
-                max_connections=20,
-                keepalive_expiry=60.0
-            ),
-            http2=True  # Enable HTTP/2 for better performance
+                max_keepalive_connections=5,
+                max_connections=10,
+                keepalive_expiry=30.0
+            )
         )
+
+
 
 
         print(f"✅ ElevenLabsClient initialized (Voice: {self.voice_id[:8]}...)")
 
 
+
+
     async def text_to_speech_fast(self, text: str) -> Optional[bytes]:
         """
-        Ultra-optimized text-to-speech conversion.
-        - Uses fastest model (eleven_turbo_v2_5)
-        - Aggressive latency optimization
-        - Connection reuse
-        - Minimal voice settings
+        OPTIMIZED: Convert text to speech with minimal latency
+        - Uses eleven_turbo_v2_5 (fastest model)
+        - Optimized voice settings for speed
+        - Persistent HTTP connection
         """
         if not text.strip():
             return None
+
+
 
 
         try:
@@ -69,48 +81,57 @@ class ElevenLabsClient:
             }
 
 
-            # ULTRA-OPTIMIZED payload for minimum latency
+
+
+            # SPEED-OPTIMIZED settings
             payload = {
                 "text": text,
-                "model_id": "eleven_turbo_v2_5",
+                "model_id": "eleven_turbo_v2_5",  # Fastest available model
                 "voice_settings": {
-                    "stability": 0.4,  # Lower = faster generation
-                    "similarity_boost": 0.7,
-                    "style": 0.0,
-                    "use_speaker_boost": False
+                    "stability": 0.5,  # Lower = faster processing
+                    "similarity_boost": 0.75,
+                    "style": 0.0,  # Disable style for speed
+                    "use_speaker_boost": False  # Disable for speed
                 },
-                "optimize_streaming_latency": 4,  # Maximum optimization
-                "output_format": "mp3_44100_128"  # Balanced quality/speed
+                "optimize_streaming_latency": 4  # Maximum optimization
             }
 
 
-            # Make request with connection reuse
+
+
+            # Make request
             response = await self.client.post(url, json=payload, headers=headers)
             response.raise_for_status()
+
+
 
 
             mp3_bytes = response.content
 
 
+
+
             if len(mp3_bytes) < 100:
-                print(f"⚠️ TTS returned very short audio: {len(mp3_bytes)} bytes")
                 return None
 
 
-            # Convert to 8kHz PCM
+
+
+            # Convert to PCM
             pcm_audio = await self._convert_to_pcm_fast(mp3_bytes)
             return pcm_audio
 
 
+
+
         except httpx.HTTPStatusError as e:
-            print(f"❌ ElevenLabs HTTP error {e.response.status_code}: {e.response.text[:200]}")
-            return None
-        except httpx.TimeoutException:
-            print(f"❌ ElevenLabs timeout")
+            print(f"❌ ElevenLabs error: {e.response.status_code}")
             return None
         except Exception as e:
             print(f"❌ TTS error: {e}")
             return None
+
+
 
 
     async def text_to_speech(self, text: str) -> Optional[bytes]:
@@ -118,47 +139,53 @@ class ElevenLabsClient:
         return await self.text_to_speech_fast(text)
 
 
+
+
     async def _convert_to_pcm_fast(self, mp3_bytes: bytes) -> Optional[bytes]:
         """
-        Optimized MP3 to 8kHz PCM conversion.
+        OPTIMIZED: Fast MP3 to PCM conversion
         """
         if not PYDUB_AVAILABLE:
-            print("❌ pydub unavailable - cannot convert audio")
+            print("❌ pydub unavailable")
             return None
 
 
+
+
         try:
-            # Load MP3
+            # Load and convert in one go
             audio = AudioSegment.from_file(io.BytesIO(mp3_bytes), format="mp3")
            
-            # Apply all conversions in single chain
+            # Apply all conversions at once
             audio = (audio
-                     .set_frame_rate(8000)     # Twilio requires 8kHz
-                     .set_channels(1)           # Mono
-                     .set_sample_width(2))      # 16-bit
+                     .set_frame_rate(8000)
+                     .set_channels(1)
+                     .set_sample_width(2))
            
-            # Normalize audio for better quality
-            # Target -6 dB to prevent clipping
-            target_dBFS = -6.0
-            change_in_dBFS = target_dBFS - audio.dBFS
-            audio = audio.apply_gain(change_in_dBFS)
+            # Quick normalization
+            audio = audio.apply_gain(-audio.max_dBFS + (-3.0))
            
             pcm_data = audio.raw_data
 
 
+
+
             if len(pcm_data) < 1000:
-                print(f"⚠️ Conversion resulted in very short PCM: {len(pcm_data)} bytes")
                 return None
+
+
 
 
             return pcm_data
 
 
+
+
         except Exception as e:
-            print(f"❌ Audio conversion error: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"❌ Conversion error: {e}")
             return None
+
+
 
 
     async def _convert_to_pcm(self, mp3_bytes: bytes) -> Optional[bytes]:
@@ -166,10 +193,13 @@ class ElevenLabsClient:
         return await self._convert_to_pcm_fast(mp3_bytes)
 
 
+
+
     async def close(self):
-        """Close the HTTP client gracefully"""
+        """Close the HTTP client"""
         await self.client.aclose()
-        print("✅ ElevenLabsClient closed")
+
+
 
 
     def __del__(self):
@@ -179,8 +209,10 @@ class ElevenLabsClient:
             loop = asyncio.get_event_loop()
             if loop.is_running():
                 loop.create_task(self.client.aclose())
-            else:
-                asyncio.run(self.client.aclose())
         except:
             pass
+
+
+
+
 
