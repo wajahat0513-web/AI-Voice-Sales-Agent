@@ -29,7 +29,7 @@ multidict
 numpy
 openai
 packaging
-postgrest
+#postgrest
 propcache
 pyactiveresource
 #PyAudio
@@ -41,18 +41,18 @@ PyJWT
 python-dotenv
 python-multipart
 PyYAML
-realtime
+#realtime
 requests
 scipy
 ShopifyAPI
 six
 sniffio
 starlette
-storage3
+#storage3
 StrEnum
-supabase
-supabase-auth
-supabase-functions
+#supabase
+#supabase-auth
+#supabase-functions
 tqdm
 twilio
 typing_extensions
@@ -113,5 +113,16 @@ python-json-logger==2.0.7
 
 #sounddevice
 #soundfile
+
+# Supabase (Pinned versions)
+supabase==2.22.1
+postgrest==2.22.1
+realtime==2.0.2
+storage3==2.0.4
+supabase-auth==2.4.1
+supabase-functions==2.0.1
+
+
+
 
 
