@@ -26,6 +26,9 @@ numpy==1.24.3
 # Database
 psycopg2-binary==2.9.9
 
+# WebSockets - CRITICAL: Must be >=13.0 for realtime package
+websockets>=13.0
+
 # Supabase (Pinned versions)
 supabase==2.22.1
 postgrest==2.22.1
@@ -36,9 +39,6 @@ supabase-functions==2.22.1
 
 # ElevenLabs
 elevenlabs
-
-# WebSockets
-websockets==12.0
 
 # Additional utilities
 python-multipart==0.0.6
