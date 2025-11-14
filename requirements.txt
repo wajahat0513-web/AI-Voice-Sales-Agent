@@ -1,4 +1,3 @@
-# Core dependencies (unpinned for flexibility)
 aiohappyeyeballs
 aiohttp
 aiohttp-retry
@@ -6,6 +5,7 @@ aiosignal
 annotated-types
 anyio
 attrs
+audioread
 certifi
 cffi
 charset-normalizer
@@ -14,77 +14,95 @@ colorama
 cryptography
 deprecation
 distro
+fastapi
 frozenlist
 h11
 h2
 hpack
+httpcore
+httpx
 hyperframe
 idna
 jiter
 loguru
 multidict
+numpy
+openai
+packaging
+postgrest
 propcache
 pyactiveresource
+PyAudio
 pycparser
+pydantic
+pydantic_core
+pydub
+PyJWT
+python-dotenv
+python-multipart
+PyYAML
+realtime
+requests
+scipy
+ShopifyAPI
 six
 sniffio
+starlette
+storage3
 StrEnum
+supabase
+supabase-auth
+supabase-functions
 tqdm
+twilio
 typing_extensions
 typing-inspection
 urllib3
+uvicorn
+websockets
+win32_setctime
 yarl
-aiofiles
-tenacity
-jinja2
-elevenlabs
 
-# Core Framework (with compatible versions)
+
+
+
+# Core Framework
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
-starlette==0.27.0
 python-dotenv==1.0.0
-
-# Pydantic - Updated to satisfy realtime requirement
-pydantic>=2.11.7,<3.0.0
-pydantic_core
+pydantic==2.5.0
 pydantic-settings==2.1.0
+
 
 # Twilio Integration
 twilio==8.10.0
 
+
 # OpenAI & AI Services
 openai==1.3.5
+
 
 # HTTP Client
 httpx==0.25.1
 
+
 # Audio Processing
 pydub==0.25.1
 numpy==1.24.3
-scipy
 
-# Database
-psycopg2-binary==2.9.9
+
+# Database (if using)
+psycopg2-binary==2.9.9  # PostgreSQL
+# OR
+# pymongo==4.6.0  # MongoDB
+
 
 # Additional utilities
 python-multipart==0.0.6
 websockets==12.0
+
+
+# Optional: Logging and monitoring
 python-json-logger==2.0.7
-PyJWT
-PyYAML
-requests
-
-# Server
-gunicorn
-uvloop
-
-# Supabase (Pinned versions)
-supabase==2.22.1
-postgrest==2.22.1
-realtime==2.22.1
-storage3==2.22.1
-supabase-auth==2.22.1
-supabase-functions==2.22.1
 
 
