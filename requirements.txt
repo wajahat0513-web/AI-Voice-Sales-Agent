@@ -88,7 +88,7 @@ openai==1.3.5
 
 
 # HTTP Client
-httpx==0.25.1
+httpx==0.28.1
 
 
 # Audio Processing
@@ -121,6 +121,7 @@ realtime==2.22.1
 storage3==2.22.1
 supabase-auth==2.22.1
 supabase-functions==2.22.1
+
 
 
 
