@@ -117,10 +117,11 @@ python-json-logger==2.0.7
 # Supabase (Pinned versions)
 supabase==2.22.1
 postgrest==2.22.1
-realtime==2.0.2
-storage3==2.0.4
-supabase-auth==2.4.1
-supabase-functions==2.0.1
+realtime==2.22.1
+storage3==2.22.1
+supabase-auth==2.22.1
+supabase-functions==2.22.1
+
 
 
 
