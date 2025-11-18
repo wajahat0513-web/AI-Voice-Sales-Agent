@@ -590,44 +590,44 @@ async def media_stream(websocket: WebSocket):
             except Exception as e:
                 print(f"⚠️ Database logging error: {e}")
 
-        # Create Zendesk ticket (COMMENTED OUT - uncomment if needed)
-        # if zendesk_client and summary and call_sid:
-        #     try:
-        #         ticket_id = zendesk_client.create_ticket(
-        #             subject=f"AI Call from {caller_number or 'Unknown'}",
-        #             description=f"""Call Summary:
-        # {summary}
-        #
-        # Full Transcript:
-        # {full_transcript}
-        #
-        # Call Details:
-        # - Call SID: {call_sid}
-        # - From: {caller_number}
-        # - To: {called_number}
-        # - Duration: {duration} seconds
-        # - Email: {caller_email or 'Not provided'}
-        # """,
-        #             requester_email=caller_email or "noreply@artbymaudsch.com",
-        #             tags=["ai_call", "phone_support", "automated"]
-        #         )
-        #         
-        #         print(f"🎫 Zendesk ticket created: #{ticket_id}")
-        #         
-        #         # Log ticket to database
-        #         if db_client:
-        #             try:
-        #                 db_client.insert_zendesk_ticket(
-        #                     call_sid=call_sid,
-        #                     zendesk_ticket_id=ticket_id
-        #                 )
-        #             except Exception as e:
-        #                 if "duplicate key" not in str(e).lower():
-        #                     print(f"⚠️ Zendesk ticket logging error: {e}")
-        #     
-        #     except Exception as e:
-        #         print(f"⚠️ Zendesk ticket creation error: {e}")
-        #         traceback.print_exc()
+        #Create Zendesk ticket (COMMENTED OUT - uncomment if needed)
+        if zendesk_client and summary and call_sid:
+            try:
+                ticket_id = zendesk_client.create_ticket(
+                    subject=f"AI Call from {caller_number or 'Unknown'}",
+                    description=f"""Call Summary:
+        {summary}
+        
+        Full Transcript:
+        {full_transcript}
+        
+        Call Details:
+        - Call SID: {call_sid}
+        - From: {caller_number}
+        - To: {called_number}
+        - Duration: {duration} seconds
+        - Email: {caller_email or 'Not provided'}
+        """,
+                    requester_email=caller_email or "noreply@artbymaudsch.com",
+                    tags=["ai_call", "phone_support", "automated"]
+                )
+                
+                print(f"🎫 Zendesk ticket created: #{ticket_id}")
+                
+                # Log ticket to database
+                if db_client:
+                    try:
+                        db_client.insert_zendesk_ticket(
+                            call_sid=call_sid,
+                            zendesk_ticket_id=ticket_id
+                        )
+                    except Exception as e:
+                        if "duplicate key" not in str(e).lower():
+                            print(f"⚠️ Zendesk ticket logging error: {e}")
+            
+            except Exception as e:
+                print(f"⚠️ Zendesk ticket creation error: {e}")
+                traceback.print_exc()
         
         print(f"✅ Call session complete: {call_sid}")
         print(f"   Duration: {duration}s")
