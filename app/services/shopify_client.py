@@ -153,11 +153,25 @@ class ShopifyClient:
             for idx, variant in enumerate(phone_variants, 1):
                 print(f"\n📡 REST Search {idx}/{len(phone_variants)}: '{variant}'")
                 url = f"{self.base_url}/customers/search.json"
-                response = self.session.get(url, params={"query": f"phone:{variant}"}, timeout=10)
+                # response = self.session.get(url, params={"query": f"phone:{variant}"}, timeout=10)
 
-                if response.status_code != 200:
-                    print(f"    ⚠️ REST request failed: {response.status_code}")
+                # if response.status_code != 200:
+                #     print(f"    ⚠️ REST request failed: {response.status_code}")
+                #     continue
+                # Minimal retry
+                for attempt in range(2):  # try twice
+                    try:
+                        response = self.session.get(url, params={"query": f"phone:{variant}"}, timeout=10)
+                        if response.status_code == 200:
+                            break
+                        print(f"    ⚠️ REST request failed: {response.status_code}")
+                    except Exception as e:
+                        print(f"    ⚠️ REST request exception (attempt {attempt+1}): {e}")
+                        time.sleep(0.5)  # small delay before retry
+                else:
+                    print("    ❌ REST search failed after 2 attempts")
                     continue
+
 
                 customers = response.json().get("customers", [])
                 print(f"    Found {len(customers)} potential match(es)")
@@ -576,4 +590,5 @@ class ShopifyClient:
 
         except Exception as e:
             print(f"⚠️ Error tagging: {e}")
+
             return False
