@@ -285,6 +285,169 @@ def build_order_context(order_context: Optional[Dict]) -> str:
     
     return context
 
+
+def build_catalog_highlights(catalog_context: Optional[Dict]) -> str:
+    """
+    Build a concise string describing featured collections and artworks.
+    """
+    if not catalog_context:
+        return ""
+
+    sections = []
+
+    custom = catalog_context.get("custom_collections") or []
+    if custom:
+        lines = []
+        for col in custom[:4]:
+            summary = col.get("body") or "Handmade selection"
+            title = col.get("title", "Collection")
+            lines.append(f"- {title}: {summary}")
+        sections.append("FEATURED COLLECTIONS:\n" + "\n".join(lines))
+
+    products = catalog_context.get("products") or []
+    if products:
+        lines = []
+        for product in products[:5]:
+            title = product.get("title", "Artwork")
+            art_type = product.get("type") or "Art"
+            price = product.get("price_range")
+            tags = product.get("tags")
+            desc = product.get("description")
+
+            parts = [f"{title} ({art_type})"]
+            extras = []
+            if price:
+                extras.append(price)
+            if tags:
+                tag_preview = tags if len(tags) <= 50 else tags[:50] + "..."
+                extras.append(tag_preview)
+            if extras:
+                parts.append(" • ".join(extras))
+            if desc:
+                snippet = desc if len(desc) <= 100 else desc[:100] + "..."
+                parts.append(snippet)
+
+            lines.append("- " + " :: ".join(parts))
+        sections.append("HIGHLIGHTED ARTWORKS:\n" + "\n".join(lines))
+
+    if sections:
+        return "\n".join(sections) + "\n"
+
+    return ""
+
+
+def resolve_keywords(base_term: str) -> List[str]:
+    term = base_term.lower()
+    synonyms = {
+        "modern": ["modern", "contemporary", "abstract", "minimalist"],
+        "abstract": ["abstract", "modern", "contemporary"],
+        "landscape": ["landscape", "coastal", "seascape", "nature", "mountain", "forest"],
+        "seascape": ["seascape", "coastal", "ocean", "marine"],
+        "floral": ["flowers", "floral", "botanical", "garden"],
+        "textured": ["textured", "3d", "impasto", "raised", "sculpted"],
+        "minimal": ["minimal", "minimalist", "modern", "clean"],
+        "animal": ["animal", "wildlife", "safari", "lion", "horse", "bird"],
+        "coastal": ["coastal", "seaside", "seascape", "beach"],
+        "blue": ["blue", "ocean", "sky", "azure"],
+        "gold": ["gold", "metallic", "luxury", "gilded"],
+        "warm": ["warm", "earthy", "sunset"],
+        "cool": ["cool", "icy", "calm"],
+        "triptych": ["triptych", "set", "three-piece", "3-set"],
+        "office": ["office", "workspace", "corporate"],
+        "living": ["living room", "family room", "sofa"],
+        "bedroom": ["bedroom", "relaxing", "calming"]
+    }
+    for key, values in synonyms.items():
+        if term in values:
+            return values
+    return [term]
+
+
+def search_catalog_for_request(
+    message: str,
+    catalog_context: Optional[Dict],
+    max_results: int = 3
+) -> Optional[Dict]:
+    """
+    Lightweight keyword search across catalog snapshot to find relevant products.
+    """
+    if not catalog_context or not message:
+        return None
+
+    base_words = [
+        w.lower()
+        for w in re.findall(r"[A-Za-z]{3,}", message)
+        if len(w) >= 3
+    ]
+    if not base_words:
+        return None
+
+    expanded_terms = set()
+    for w in base_words:
+        for term in resolve_keywords(w):
+            expanded_terms.add(term)
+
+    products = catalog_context.get("products") or []
+    matches = []
+    for product in products:
+        haystack = " ".join([
+            product.get("title", ""),
+            product.get("type", "") or "",
+            product.get("tags", "") or "",
+            product.get("description", "") or ""
+        ]).lower()
+        score = sum(1 for word in expanded_terms if word in haystack)
+        if score > 0:
+            matches.append((score, product))
+
+    matches.sort(key=lambda x: x[0], reverse=True)
+    top_matches = [p for _, p in matches[:max_results]]
+
+    # Fallback collections if no matches
+    fallbackCols = []
+    if not top_matches:
+        fallbackCols = (catalog_context.get("custom_collections") or [])[:max_results]
+
+    if not top_matches and not fallbackCols:
+        return None
+
+    return {
+        "query_terms": list(expanded_terms),
+        "products": top_matches,
+        "fallback_collections": fallbackCols
+    }
+
+
+def build_catalog_match_section(suggestions: Optional[Dict]) -> str:
+    if not suggestions:
+        return ""
+
+    lines = []
+    products = suggestions.get("products") or []
+
+    if products:
+        lines.append("MATCHED ARTWORKS (mention at least two before asking questions):")
+        for product in products:
+            title = product.get("title", "Artwork")
+            price = product.get("price_range") or ""
+            desc = product.get("description") or ""
+            snippet = desc if len(desc) <= 100 else desc[:100] + "..."
+            tags = product.get("tags") or ""
+            lines.append(f"- {title} ({price}) • {tags}\n  {snippet}")
+
+    fallbacks = suggestions.get("fallback_collections") or []
+    if fallbacks:
+        lines.append("SUGGESTED COLLECTIONS:")
+        for col in fallbacks:
+            title = col.get("title")
+            body = col.get("body") or "Handmade art collection"
+            lines.append(f"- {title}: {body}")
+
+    if lines:
+        return "\n".join(lines) + "\n"
+
+    return ""
+
 async def generate_ai_response_live(
     current_message: str,
     caller_email: Optional[str] = None,
@@ -292,7 +455,9 @@ async def generate_ai_response_live(
     shopify_data_cache: Optional[dict] = None,
     caller_memory: Optional[dict] = None,
     conversation_history: Optional[List[Dict]] = None,
-    order_context: Optional[Dict] = None  # NEW: Specific order context
+    order_context: Optional[Dict] = None,  # NEW: Specific order context
+    catalog_context: Optional[Dict] = None,  # NEW: Catalog highlights for product knowledge
+    catalog_suggestions: Optional[Dict] = None  # NEW: Products matched to current message
 ) -> Tuple[str, Optional[bytes]]:
     """
     Generate AI response with IMPROVED MEMORY and CONFIRMATION HANDLING.
@@ -353,6 +518,10 @@ async def generate_ai_response_live(
     
     # NEW: Build order context if available
     order_info = build_order_context(order_context) if order_context else ""
+
+    # NEW: Build catalog context
+    catalog_info = build_catalog_highlights(catalog_context)
+    catalog_matches = build_catalog_match_section(catalog_suggestions)
     
     # NEW: Build conversation context (use last 8 messages)
     recent_conversation = ""
@@ -452,6 +621,13 @@ Customer Info:
 - Phone: {caller_memory.get('customer_info', {}).get('phone', 'Caller phone')}
 - Email: {caller_email or caller_memory.get('email') or caller_memory.get('customer_info', {}).get('email', 'On file')}
 {customer_orders_info}
+
+Catalog Highlights:
+{catalog_info or 'Use your best judgment based on caller requests.'}
+
+Live Catalog Matches:
+{catalog_matches or 'If none are listed, ask a clarifying question before recommending.'}
+If MATCHED ARTWORKS are provided, speak about at least two specific pieces before asking for more preferences.
 
 {verification_guidance}
 
@@ -586,7 +762,7 @@ You: "I'm all about art, not movies — maybe I can show you some new paintings?
                     model="gpt-4o-mini",
                     messages=messages,
                     temperature=0.7,
-                    max_tokens=40,
+                    max_tokens=45,
                     presence_penalty=0.6,
                     frequency_penalty=0.3,
                 )
@@ -596,13 +772,17 @@ You: "I'm all about art, not movies — maybe I can show you some new paintings?
             
             # UPDATED: Force truncate if still too long (max 20 words for normal, 15 for questions)
             words = ai_text.split()
-            max_words = 15 if '?' in ai_text else 20
+            soft_limit = 15 if '?' in ai_text else 20
+            hard_limit = soft_limit + 5  # allow a few extra words to finish the thought
             
-            if len(words) > max_words:
-                ai_text = ' '.join(words[:max_words])
-                # Add period if not already punctuated
-                if not ai_text[-1] in '.!?':
-                    ai_text += '.'
+            if len(words) > hard_limit:
+                ai_text = ' '.join(words[:hard_limit])
+            elif len(words) > soft_limit:
+                ai_text = ' '.join(words[:len(words)])
+            
+            # Ensure sentence ends cleanly
+            if ai_text and not ai_text[-1] in '.!?':
+                ai_text += '.'
             
             gpt_time = time.time() - start_time
             print(f"✅ AI text ({gpt_time:.2f}s): '{ai_text}'")
@@ -644,7 +824,9 @@ async def generate_ai_text_only(
     shopify_data_cache: Optional[dict] = None,
     caller_memory: Optional[dict] = None,
     conversation_history: Optional[List[Dict]] = None,
-    order_context: Optional[Dict] = None
+    order_context: Optional[Dict] = None,
+    catalog_context: Optional[Dict] = None,
+    catalog_suggestions: Optional[Dict] = None
 ) -> str:
     """Generate AI response text without TTS."""
     ai_text, _ = await generate_ai_response_live(
@@ -654,6 +836,8 @@ async def generate_ai_text_only(
         shopify_data_cache,
         caller_memory,
         conversation_history,
-        order_context
+        order_context,
+        catalog_context,
+        catalog_suggestions
     )
     return ai_text

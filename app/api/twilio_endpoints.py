@@ -2,7 +2,12 @@
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import Response
-from app.services.ai_service import generate_ai_response_live, transcribe_audio, summarize_conversation
+from app.services.ai_service import (
+    generate_ai_response_live,
+    transcribe_audio,
+    summarize_conversation,
+    search_catalog_for_request
+)
 from app.services.zendesk_client import ZendeskClient
 from app.services.shopify_client import ShopifyClient
 from app.core.db_client import DatabaseClient
@@ -244,6 +249,14 @@ async def status_webhook(request: Request):
 # Global cache for Shopify data per call - ENHANCED
 _shopify_cache = {}
 
+# Global catalog snapshot for product knowledge
+_catalog_snapshot = {
+    "data": None,
+    "timestamp": 0
+}
+_catalog_lock = None
+CATALOG_REFRESH_SECONDS = 60 * 60  # 1 hour
+
 # ============================================================
 # WEBSOCKET MEDIA STREAM - IMPROVED INTERRUPTION & MEMORY
 # ============================================================
@@ -292,6 +305,9 @@ async def media_stream(websocket: WebSocket):
     # NEW: Shopify fetch lock - NEVER interrupted
     shopify_lock = asyncio.Lock()
     shopify_fetch_in_progress = False
+
+    # Catalog knowledge shared across responses
+    catalog_context = None
     
     # IMPROVED: Better interruption handling state
     is_agent_speaking = False
@@ -301,16 +317,17 @@ async def media_stream(websocket: WebSocket):
     # UPDATED: More robust interruption thresholds
     speech_energy_threshold = 1500.0  # INCREASED from 1000 to reduce false interruptions
     consecutive_speech_frames = 0
-    speech_frames_needed = 6  # INCREASED from 4 to require more sustained speech
+    speech_frames_needed = 8  # Require more sustained energy to mark interruptions
     
     # UPDATED: Better silence detection for complete utterances
-    silence_frames_to_process = 15  # INCREASED from 10 to wait for ~1.5s of silence (allows pauses between sentences)
+    silence_frames_to_process = 22  # Wait ~2.2s of silence to avoid cutting callers off
     silence_frame_count = 0
     
     # NEW: Track if we're accumulating a multi-sentence utterance
     utterance_started = False
     utterance_start_time = 0
     max_utterance_duration = 15.0  # Max 15 seconds for a single utterance
+    post_speech_grace_seconds = 1.2  # Wait at least 1.2s after user speech before responding
     
     try:
         while not stop_received:
@@ -346,6 +363,9 @@ async def media_stream(websocket: WebSocket):
                     print(f"   From: {caller_number}")
                     print(f"   To: {called_number}")
                     print(f"   Email: {caller_email or 'Not provided'}")
+
+                    if shopify_client and catalog_context is None:
+                        catalog_context = await get_catalog_snapshot()
                     
                     # CRITICAL: Fetch customer by phone number IMMEDIATELY
                     if shopify_client and caller_number and caller_number != "Unknown":
@@ -456,6 +476,13 @@ async def media_stream(websocket: WebSocket):
                                     # Only process if not already processing
                                     if not processing_lock.locked():
                                         combined_mulaw = b''.join(audio_buffer)
+
+                                        if not force_process:
+                                            time_since_last_speech = time.time() - last_user_speech_time
+                                            if time_since_last_speech < post_speech_grace_seconds:
+                                                # Wait a bit longer before responding
+                                                continue
+
                                         audio_buffer.clear()
                                         silence_frame_count = 0
                                         utterance_started = False
@@ -481,7 +508,8 @@ async def media_stream(websocket: WebSocket):
                                                     processing_lock,
                                                     caller_memory,  # NEW: Pass caller memory
                                                     shopify_lock,  # NEW: Pass shopify lock
-                                                    lambda v: setattr_wrapper(locals(), 'shopify_fetch_in_progress', v)
+                                                    lambda v: setattr_wrapper(locals(), 'shopify_fetch_in_progress', v),
+                                                    catalog_context
                                                 )
                                             )
                                             
@@ -776,6 +804,52 @@ async def fetch_order_details(order_name: str, customer_id: Optional[int], calle
             traceback.print_exc()
             return None
 
+
+async def get_catalog_snapshot(force: bool = False):
+    """
+    Fetch and cache Shopify catalog overview for conversational context.
+    """
+    global _catalog_snapshot, _catalog_lock
+
+    if not shopify_client:
+        return None
+
+    now = time.time()
+    cached = _catalog_snapshot.get("data")
+    if (
+        cached
+        and not force
+        and now - _catalog_snapshot.get("timestamp", 0) < CATALOG_REFRESH_SECONDS
+    ):
+        return cached
+
+    if _catalog_lock is None:
+        _catalog_lock = asyncio.Lock()
+
+    async with _catalog_lock:
+        cached = _catalog_snapshot.get("data")
+        if (
+            cached
+            and not force
+            and time.time() - _catalog_snapshot.get("timestamp", 0) < CATALOG_REFRESH_SECONDS
+        ):
+            return cached
+
+        try:
+            loop = asyncio.get_event_loop()
+            overview = await loop.run_in_executor(
+                None,
+                shopify_client.get_catalog_overview
+            )
+            if overview:
+                _catalog_snapshot["data"] = overview
+                _catalog_snapshot["timestamp"] = time.time()
+                return overview
+        except Exception as e:
+            print(f"⚠️ Catalog snapshot error: {e}")
+
+    return _catalog_snapshot.get("data")
+
 async def send_greeting(websocket: WebSocket, stream_sid: str, conversation_history: list, 
                        interrupt_flag: asyncio.Event, is_speaking: bool, set_speaking):
     """Send greeting with minimal delay and interruption support"""
@@ -849,7 +923,8 @@ async def process_audio_chunk_fast(
     processing_lock: asyncio.Lock,
     caller_memory: dict,  # NEW: Persistent caller memory
     shopify_lock: asyncio.Lock,  # NEW: Shopify lock
-    set_shopify_fetch_in_progress  # NEW: Callback to set shopify fetch status
+    set_shopify_fetch_in_progress,  # NEW: Callback to set shopify fetch status
+    catalog_context: Optional[dict] = None  # NEW: Catalog snapshot for product info
 ):
     """Process audio chunk with IMPROVED INTERRUPTION HANDLING and CALLER MEMORY"""
     
@@ -978,6 +1053,11 @@ async def process_audio_chunk_fast(
                         print(f"✅ Using cached order: {order_num}")
                 
                 print("🤖 Generating AI response...")
+
+                product_suggestions = None
+                if catalog_context:
+                    product_suggestions = search_catalog_for_request(transcript, catalog_context)
+
                 ai_text, ai_audio_8khz_pcm = await generate_ai_response_live(
                     transcript,  # Pass only current transcript
                     caller_email=caller_email,
@@ -985,7 +1065,9 @@ async def process_audio_chunk_fast(
                     shopify_data_cache=cached_shopify,
                     caller_memory=caller_memory,  # NEW: Pass caller memory
                     conversation_history=conversation_history,  # NEW: Pass full conversation history
-                    order_context=order_context  # NEW: Pass specific order context if fetched
+                    order_context=order_context,  # NEW: Pass specific order context if fetched
+                    catalog_context=catalog_context,  # NEW: Product knowledge
+                    catalog_suggestions=product_suggestions
                 )
                 
                 if not ai_text or len(ai_text.strip()) < 2:

@@ -1,8 +1,9 @@
 # app/services/shopify_client.py
 
 import os
+import re
 import requests
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from dotenv import load_dotenv
 import time
 import json
@@ -59,6 +60,16 @@ class ShopifyClient:
         if len(digits2) == 11 and digits2.startswith('1'):
             digits2 = digits2[1:]
         return digits1 == digits2
+
+    def _strip_html(self, text: Optional[str], max_len: int = 240) -> str:
+        """Remove HTML tags and collapse whitespace."""
+        if not text:
+            return ""
+        clean = re.sub(r"<[^>]+>", " ", text)
+        clean = re.sub(r"\s+", " ", clean).strip()
+        if len(clean) > max_len:
+            clean = clean[:max_len].rstrip() + "..."
+        return clean
 
     def _search_customers_graphql(self, query: str) -> List[Dict]:
         """Search customers using Shopify GraphQL API (updated schema)."""
@@ -153,10 +164,23 @@ class ShopifyClient:
             for idx, variant in enumerate(phone_variants, 1):
                 print(f"\n📡 REST Search {idx}/{len(phone_variants)}: '{variant}'")
                 url = f"{self.base_url}/customers/search.json"
-                response = self.session.get(url, params={"query": f"phone:{variant}"}, timeout=10)
+                # response = self.session.get(url, params={"query": f"phone:{variant}"}, timeout=10)
 
-                if response.status_code != 200:
-                    print(f"    ⚠️ REST request failed: {response.status_code}")
+                # if response.status_code != 200:
+                #     print(f"    ⚠️ REST request failed: {response.status_code}")
+                #     continue
+                # Minimal retry
+                for attempt in range(2):  # try twice
+                    try:
+                        response = self.session.get(url, params={"query": f"phone:{variant}"}, timeout=10)
+                        if response.status_code == 200:
+                            break
+                        print(f"    ⚠️ REST request failed: {response.status_code}")
+                    except Exception as e:
+                        print(f"    ⚠️ REST request exception (attempt {attempt+1}): {e}")
+                        time.sleep(0.5)  # small delay before retry
+                else:
+                    print("    ❌ REST search failed after 2 attempts")
                     continue
 
                 customers = response.json().get("customers", [])
@@ -577,3 +601,119 @@ class ShopifyClient:
         except Exception as e:
             print(f"⚠️ Error tagging: {e}")
             return False
+
+    # ---------------------------------------------------------------
+    # 🔹 CATALOG OVERVIEW
+    # ---------------------------------------------------------------
+
+    def get_catalog_overview(
+        self,
+        limit_collections: int = 6,
+        limit_products: int = 8
+    ) -> Dict[str, List[Dict]]:
+        """
+        Fetch a lightweight snapshot of collections and products
+        for conversational context.
+        """
+        overview = {
+            "custom_collections": [],
+            "smart_collections": [],
+            "products": []
+        }
+
+        try:
+            params = {"limit": limit_collections, "order": "updated_at desc"}
+
+            # Custom collections
+            custom_resp = self.session.get(
+                f"{self.base_url}/custom_collections.json",
+                params=params,
+                timeout=15
+            )
+            if custom_resp.status_code == 200:
+                overview["custom_collections"] = [
+                    {
+                        "title": col.get("title"),
+                        "handle": col.get("handle"),
+                        "body": self._strip_html(col.get("body_html")),
+                        "updated_at": col.get("updated_at")
+                    }
+                    for col in custom_resp.json().get("custom_collections", [])
+                ]
+
+            # Smart collections
+            smart_resp = self.session.get(
+                f"{self.base_url}/smart_collections.json",
+                params=params,
+                timeout=15
+            )
+            if smart_resp.status_code == 200:
+                overview["smart_collections"] = [
+                    {
+                        "title": col.get("title"),
+                        "handle": col.get("handle"),
+                        "rules": len(col.get("rules", [])),
+                        "updated_at": col.get("updated_at")
+                    }
+                    for col in smart_resp.json().get("smart_collections", [])
+                ]
+
+            # Products
+            product_params = {
+                "limit": limit_products,
+                "fields": "id,title,body_html,product_type,tags,variants"
+            }
+            products_resp = self.session.get(
+                f"{self.base_url}/products.json",
+                params=product_params,
+                timeout=20
+            )
+            if products_resp.status_code == 200:
+                products = []
+                for product in products_resp.json().get("products", []):
+                    variants = product.get("variants", []) or []
+                    prices = []
+                    variant_labels = []
+                    for variant in variants[:3]:
+                        price = variant.get("price")
+                        try:
+                            prices.append(float(price))
+                        except (TypeError, ValueError):
+                            pass
+                        label = " / ".join(
+                            filter(
+                                None,
+                                [
+                                    variant.get("title"),
+                                    variant.get("sku"),
+                                    variant.get("option1"),
+                                    variant.get("option2")
+                                ]
+                            )
+                        )
+                        if label:
+                            variant_labels.append(label)
+
+                    price_range = ""
+                    if prices:
+                        low = min(prices)
+                        high = max(prices)
+                        price_range = f"${low:,.0f}"
+                        if high != low:
+                            price_range = f"${low:,.0f} – ${high:,.0f}"
+
+                    products.append({
+                        "title": product.get("title"),
+                        "type": product.get("product_type") or "Art",
+                        "tags": product.get("tags") or "",
+                        "description": self._strip_html(product.get("body_html")),
+                        "price_range": price_range,
+                        "variants": variant_labels
+                    })
+
+                overview["products"] = products
+
+        except Exception as e:
+            print(f"⚠️ Error fetching catalog overview: {e}")
+
+        return overview
