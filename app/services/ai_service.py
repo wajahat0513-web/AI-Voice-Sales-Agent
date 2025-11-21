@@ -414,7 +414,9 @@ def search_catalog_for_request(
     return {
         "query_terms": list(expanded_terms),
         "products": top_matches,
-        "fallback_collections": fallbackCols
+        "fallback_collections": fallbackCols,
+        "total_matches": len(matches),
+        "matched_products": matches
     }
 
 
@@ -425,15 +427,19 @@ def build_catalog_match_section(suggestions: Optional[Dict]) -> str:
     lines = []
     products = suggestions.get("products") or []
 
+    total_available = suggestions.get("total_matches", len(products))
     if products:
-        lines.append("MATCHED ARTWORKS (mention at least two before asking questions):")
-        for product in products:
+        lines.append(
+            f"MATCHED ARTWORKS (found {total_available}; mention up to {len(products)} results, "
+            "or name at least two if caller didn't specify a number):"
+        )
+        for idx, product in enumerate(products, 1):
             title = product.get("title", "Artwork")
             price = product.get("price_range") or ""
             desc = product.get("description") or ""
             snippet = desc if len(desc) <= 100 else desc[:100] + "..."
             tags = product.get("tags") or ""
-            lines.append(f"- {title} ({price}) • {tags}\n  {snippet}")
+            lines.append(f"{idx}. {title} ({price}) • {tags}\n   {snippet}")
 
     fallbacks = suggestions.get("fallback_collections") or []
     if fallbacks:
@@ -799,7 +805,7 @@ You: "I'm all about art, not movies — maybe I can show you some new paintings?
             eleven_client = get_elevenlabs_client()  # Reuse persistent client
             
             # Start TTS immediately
-            raw_audio_bytes = await eleven_client.text_to_speech_fast(ai_text)
+            raw_audio_bytes = await eleven_client.text_to_speech_fast(ai_text, speed=0.9)
             
             if raw_audio_bytes and len(raw_audio_bytes) > 100:
                 ai_audio_8khz_pcm = raw_audio_bytes

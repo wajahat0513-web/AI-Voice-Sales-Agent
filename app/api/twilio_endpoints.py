@@ -1056,7 +1056,19 @@ async def process_audio_chunk_fast(
 
                 product_suggestions = None
                 if catalog_context:
-                    product_suggestions = search_catalog_for_request(transcript, catalog_context)
+                    try:
+                        requested_count = None
+                        import re as _re
+                        count_match = _re.search(r'\b(\d{1,2})\b', transcript)
+                        if count_match:
+                            requested_count = int(count_match.group(1))
+                        product_suggestions = search_catalog_for_request(
+                            transcript,
+                            catalog_context,
+                            max_results=requested_count if requested_count else 3
+                        )
+                    except Exception as search_err:
+                        print(f"⚠️ Catalog search error: {search_err}")
 
                 ai_text, ai_audio_8khz_pcm = await generate_ai_response_live(
                     transcript,  # Pass only current transcript

@@ -41,7 +41,7 @@ class ElevenLabsClient:
 
         print(f"✅ ElevenLabsClient initialized (Voice: {self.voice_id[:8]}...)")
 
-    async def text_to_speech_fast(self, text: str) -> Optional[bytes]:
+    async def text_to_speech_fast(self, text: str, speed: float = 1.0) -> Optional[bytes]:
         """
         OPTIMIZED: Convert text to speech with minimal latency
         - Uses eleven_turbo_v2_5 (fastest model)
@@ -69,7 +69,8 @@ class ElevenLabsClient:
                     "style": 0.0,  # Disable style for speed
                     "use_speaker_boost": False  # Disable for speed
                 },
-                "optimize_streaming_latency": 4  # Maximum optimization
+                "optimize_streaming_latency": 4,  # Maximum optimization
+                "voice_speed": max(0.7, min(1.3, speed))  # clamp between 0.7 and 1.3
             }
 
             # Make request
