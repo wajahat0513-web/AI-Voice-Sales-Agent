@@ -805,7 +805,7 @@ You: "I'm all about art, not movies — maybe I can show you some new paintings?
             eleven_client = get_elevenlabs_client()  # Reuse persistent client
             
             # Start TTS immediately
-            raw_audio_bytes = await eleven_client.text_to_speech_fast(ai_text, speed=0.9)
+            raw_audio_bytes = await eleven_client.text_to_speech_fast(ai_text)
             
             if raw_audio_bytes and len(raw_audio_bytes) > 100:
                 ai_audio_8khz_pcm = raw_audio_bytes

@@ -41,7 +41,7 @@ class ElevenLabsClient:
 
         print(f"✅ ElevenLabsClient initialized (Voice: {self.voice_id[:8]}...)")
 
-    async def text_to_speech_fast(self, text: str, speed: float = 1.0) -> Optional[bytes]:
+    async def text_to_speech_fast(self, text: str) -> Optional[bytes]:
         """
         OPTIMIZED: Convert text to speech with minimal latency
         - Uses eleven_turbo_v2_5 (fastest model)
@@ -54,24 +54,34 @@ class ElevenLabsClient:
 
         try:
             url = f"{self.base_url}/text-to-speech/{self.voice_id}"
+            # Log voice_id to ensure consistency (first 8 chars only for security)
+            if not hasattr(self, '_voice_logged'):
+                print(f"🔊 Using ElevenLabs voice ID: {self.voice_id[:8]}... (consistent throughout call)")
+                self._voice_logged = True
             headers = {
                 "xi-api-key": self.api_key,
                 "Content-Type": "application/json"
             }
 
-            # SPEED-OPTIMIZED settings
+            # CONSISTENT voice settings for stable voice throughout call
+            voice_settings = {
+                "stability": 0.7,  # Higher = more consistent voice (was 0.5)
+                "similarity_boost": 0.75,
+                "style": 0.0,  # Disable style for consistency
+                "use_speaker_boost": True  # Enable for better voice quality
+            }
+            
             payload = {
                 "text": text,
                 "model_id": "eleven_turbo_v2_5",  # Fastest available model
-                "voice_settings": {
-                    "stability": 0.5,  # Lower = faster processing
-                    "similarity_boost": 0.75,
-                    "style": 0.0,  # Disable style for speed
-                    "use_speaker_boost": False  # Disable for speed
-                },
-                "optimize_streaming_latency": 4,  # Maximum optimization
-                "voice_speed": max(0.7, min(1.3, speed))  # clamp between 0.7 and 1.3
+                "voice_settings": voice_settings,
+                "optimize_streaming_latency": 4  # Maximum optimization
             }
+
+            # Log settings on first call to verify consistency
+            if not hasattr(self, '_settings_logged'):
+                print(f"🔊 ElevenLabs settings: voice_id={self.voice_id[:8]}..., model=eleven_turbo_v2_5, stability={voice_settings['stability']}, similarity={voice_settings['similarity_boost']}")
+                self._settings_logged = True
 
             # Make request
             response = await self.client.post(url, json=payload, headers=headers)
