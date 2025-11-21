@@ -61,6 +61,30 @@ class ShopifyClient:
             digits2 = digits2[1:]
         return digits1 == digits2
 
+    def _get_with_retry(
+        self,
+        url: str,
+        params: Optional[Dict] = None,
+        timeout: int = 15,
+        attempts: int = 2,
+        delay: float = 0.5
+    ) -> Optional[requests.Response]:
+        """Basic GET retry helper for flaky Shopify endpoints."""
+        last_error = None
+        for attempt in range(1, attempts + 1):
+            try:
+                resp = self.session.get(url, params=params, timeout=timeout)
+                if resp.status_code < 500:
+                    return resp
+                print(f"    ⚠️ GET {url} failed with {resp.status_code} (attempt {attempt}/{attempts})")
+            except Exception as exc:
+                last_error = exc
+                print(f"    ⚠️ GET {url} exception (attempt {attempt}/{attempts}): {exc}")
+            time.sleep(delay)
+        if last_error:
+            print(f"    ❌ Giving up on {url}: {last_error}")
+        return None
+
     def _strip_html(self, text: Optional[str], max_len: int = 240) -> str:
         """Remove HTML tags and collapse whitespace."""
         if not text:
@@ -182,6 +206,7 @@ class ShopifyClient:
                 else:
                     print("    ❌ REST search failed after 2 attempts")
                     continue
+
 
                 customers = response.json().get("customers", [])
                 print(f"    Found {len(customers)} potential match(es)")
@@ -625,12 +650,12 @@ class ShopifyClient:
             params = {"limit": limit_collections, "order": "updated_at desc"}
 
             # Custom collections
-            custom_resp = self.session.get(
+            custom_resp = self._get_with_retry(
                 f"{self.base_url}/custom_collections.json",
                 params=params,
                 timeout=15
             )
-            if custom_resp.status_code == 200:
+            if custom_resp and custom_resp.status_code == 200:
                 overview["custom_collections"] = [
                     {
                         "title": col.get("title"),
@@ -642,12 +667,12 @@ class ShopifyClient:
                 ]
 
             # Smart collections
-            smart_resp = self.session.get(
+            smart_resp = self._get_with_retry(
                 f"{self.base_url}/smart_collections.json",
                 params=params,
                 timeout=15
             )
-            if smart_resp.status_code == 200:
+            if smart_resp and smart_resp.status_code == 200:
                 overview["smart_collections"] = [
                     {
                         "title": col.get("title"),
@@ -663,12 +688,12 @@ class ShopifyClient:
                 "limit": limit_products,
                 "fields": "id,title,body_html,product_type,tags,variants"
             }
-            products_resp = self.session.get(
+            products_resp = self._get_with_retry(
                 f"{self.base_url}/products.json",
                 params=product_params,
                 timeout=20
             )
-            if products_resp.status_code == 200:
+            if products_resp and products_resp.status_code == 200:
                 products = []
                 for product in products_resp.json().get("products", []):
                     variants = product.get("variants", []) or []
